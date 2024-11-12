@@ -16,7 +16,6 @@ def fetch_html(url):
     driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
     try:
         driver.get(url)
-        # Wait for the page to load
         driver.implicitly_wait(10)  # Wait for elements to load
         return driver.page_source
     finally:
