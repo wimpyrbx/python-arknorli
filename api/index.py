@@ -3,7 +3,7 @@ import sys
 import json
 import argparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlencode
 from bs4 import BeautifulSoup
 from datetime import datetime
 from selenium import webdriver
@@ -50,7 +50,7 @@ class BaseScraper:
 
             # Wait for the cookie consent popup and accept it
             try:
-                WebDriverWait(driver, 5).until(
+                WebDriverWait(driver, 1).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, ".CybotCookiebotDialogBodyLevelButtonAccept"))
                 ).click()
                 output("Accepted cookie consent.")
@@ -58,7 +58,7 @@ class BaseScraper:
                 output(f"No cookie consent popup found or could not click it: {e}")
 
             # Get the page source after a short wait to ensure content is loaded
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 3).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             html_content = driver.page_source
@@ -78,27 +78,33 @@ class ArkScraper(BaseScraper):
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             
+            # Verify we have exactly one result
+            results_header = soup.find('h1')
+            if not results_header or "1 resultat:" not in results_header.text:
+                output("Ark.no - Skipping: Did not find exactly one result")
+                return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
+
             title = soup.find('h3')
             title = title.text.strip() if title else "-"
-            
+
             authors_div = soup.find('div', class_='text-cap overflow-ellipsis whitespace-nowrap overflow-hidden text-xs md:text-sm leading-superTight md:leading-superTight mt-1')
             authors = authors_div.text.strip() if authors_div else "-"
-            
+
             price_span = soup.find('span', class_='product-price-current')
             price = price_span.text.strip().replace(',-', '').strip() if price_span else "0"
-            
+
             product_url = ""
             if price_span:
                 next_link = price_span.find_next('a')
                 if next_link and 'href' in next_link.attrs:
                     product_url = f"https://www.ark.no{next_link['href']}"
-            
+
             output(f"Ark.no - Title: {title}, Authors: {authors}, Price: {price}, URL: {product_url}")
-            
+
             return {
                 "title": title,
                 "authors": authors,
-                "PRICE": float(price) if price.isdigit() else 0,
+                "PRICE": int(price) if price.isdigit() else 0,
                 "PRODUCT_URL": product_url if product_url else "-"
             }
         except Exception as e:
@@ -112,6 +118,12 @@ class NorliScraper(BaseScraper):
         """Parse the HTML content specific to Norli.no."""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Verify we have exactly one product
+            stats_span = soup.find('span', class_='ais-Stats-text')
+            if not stats_span or stats_span.text.strip() != "Produkter (1)":
+                output("Norli.no - Skipping: Did not find exactly one product")
+                return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
             
             # Find first product container
             product_div = soup.find('div', class_=lambda x: x and 'item-imageWrapper-' in x)
@@ -137,7 +149,7 @@ class NorliScraper(BaseScraper):
                 return {
                     "title": title,
                     "authors": authors,
-                    "PRICE": float(price) if price.isdigit() else 0,
+                    "PRICE": int(price) if price.isdigit() else 0,
                     "PRODUCT_URL": product_url
                 }
             return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
@@ -145,6 +157,76 @@ class NorliScraper(BaseScraper):
             error_output(f"Error parsing Norli.no HTML: {e}")
             return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
 
+class AdlibrisScraper(BaseScraper):
+    """Scraper for Adlibris.no."""
+    
+    def parse_html(self, html_content):
+        """Parse the HTML content specific to Adlibris.no."""
+        try:
+            with open('adlibris.html', 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            output("Saved HTML content to adlibris.html")
+
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # First verify we have exactly one result - with proper text cleaning
+            result_amount = soup.find('h3', class_='search-result__result__amount')
+            if result_amount:
+                # Clean the text: strip whitespace, newlines, and normalize spacing
+                result_text = ' '.join(result_amount.get_text().split())
+                output(f"Found result amount text: '{result_text}'")
+                if result_text != "1 treff":
+                    output(f"Adlibris.no - Skipping: Not exactly one result (got: {result_text})")
+                    return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
+            else:
+                output("Adlibris.no - Skipping: No result amount found")
+                return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
+
+            # Find the product wrapper - this is the key container
+            product_wrapper = soup.find('div', class_='search-result__list-view__product__wrapper')
+            if not product_wrapper:
+                output("Adlibris.no - Skipping: No product wrapper found")
+                return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
+            
+            # Get title from product name link
+            title = "-"
+            title_link = product_wrapper.find('a', class_='search-result__product__name')
+            if title_link:
+                title = ' '.join(title_link.get_text().split())
+
+            # Get author - using the author link inside product-item__authors
+            authors = "-"
+            author_link = product_wrapper.find('a', {'itemprop': 'author'})
+            if author_link:
+                authors = ' '.join(author_link.get_text().split())
+
+            # Get price from the price div within variants section
+            price = "0"
+            price_div = product_wrapper.find('div', class_='price nok')
+            if price_div and price_div.find('span'):
+                price_text = ' '.join(price_div.find('span').get_text().split())
+                price_text = price_text.replace(',-', '').strip()
+                if price_text.isdigit():
+                    price = price_text
+
+            # Get product URL
+            product_url = "-"
+            if title_link and 'href' in title_link.attrs:
+                product_url = f"https://www.adlibris.com{title_link['href']}"
+
+            output(f"Adlibris.no - Title: {title}, Authors: {authors}, Price: {price}, URL: {product_url}")
+
+            return {
+                "title": title,
+                "authors": authors,
+                "PRICE": int(price) if price.isdigit() else 0,
+                "PRODUCT_URL": product_url if product_url != "-" else "-"
+            }
+            
+        except Exception as e:
+            error_output(f"Error parsing Adlibris.no HTML: {str(e)}")
+            return {"title": "-", "authors": "-", "PRICE": 0, "PRODUCT_URL": "-"}
+        
 def scrape_book_data(isbn):
     """Scrape book data directly without using a server."""
     start_time = datetime.now()
@@ -153,18 +235,15 @@ def scrape_book_data(isbn):
     response = {
         "MESSAGE": "Data fetch initiated",
         "ISBN": isbn,
-        "TITLE": "",
-        "AUTHORS": "",
+        "TIMESTAMP": "",
         "SITES": {}
     }
 
     sites = {
         "ark.no": (ArkScraper, lambda isbn: f'https://www.ark.no/search?text={isbn}'),
-        "norli.no": (NorliScraper, lambda isbn: f'https://www.norli.no/search?query={isbn}')
+        "norli.no": (NorliScraper, lambda isbn: f'https://www.norli.no/search?query={isbn}'),
+        "adlibris.no": (AdlibrisScraper, lambda isbn: f'https://www.adlibris.com/no/sok?q={isbn}')
     }
-
-    all_authors = set()
-    longest_title = ""
 
     for site_domain, (scraper_class, url_builder) in sites.items():
         try:
@@ -174,25 +253,25 @@ def scrape_book_data(isbn):
             scraper = scraper_class(url)
             html_content = scraper.fetch_html()
             result = scraper.parse_html(html_content)
-            
-            if result["title"] != "-" and len(result["title"]) > len(longest_title):
-                longest_title = result["title"]
-            
-            if result["authors"] != "-":
-                all_authors.update(author.strip() for author in result["authors"].split(','))
 
             response["SITES"][site_domain] = {
+                "TITLE": result["title"],
+                "AUTHORS": result["authors"],
                 "PRICE": result["PRICE"],
                 "PRODUCT_URL": result["PRODUCT_URL"]
             }
 
         except Exception as e:
             error_output(f"Error scraping {site_domain}: {e}")
-            response["SITES"][site_domain] = {"PRICE": 0, "PRODUCT_URL": "-"}
+            response["SITES"][site_domain] = {
+                "TITLE": "-",
+                "AUTHORS": "-",
+                "PRICE": 0,
+                "PRODUCT_URL": "-"
+            }
 
-    response["TITLE"] = longest_title
-    response["AUTHORS"] = ", ".join(filter(None, all_authors))
     response["MESSAGE"] = "Data fetched successfully"
+    response["TIMESTAMP"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     end_time = datetime.now()
     duration = end_time - start_time
